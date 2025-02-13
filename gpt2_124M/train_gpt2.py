@@ -168,49 +168,50 @@ if torch.cuda.is_available():
 # gpt2_hf = GPT.from_pretrained('gpt2')
 print(f'all good for load model')
 
-# model = GPT(GPTConfig())
-# model.to(device)
-# torch.manual_seed(42)
-# if torch.cuda.is_available():
-#     torch.cuda.manual_seed(42)
-#     torch.cuda.manual_seed_all(42)  # For multi-GPU setups
+model = GPT(GPTConfig())
+model.to(device)
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(42)
+    torch.cuda.manual_seed_all(42)  # For multi-GPU setups
 
-# #generate text setting 
-# model.eval()
+#generate text setting 
+model.eval()
 
-# max_length = 30
-# num_return_sequences = 5
+max_length = 30
+num_return_sequences = 5
 
-# # Load the encoding for GPT-2
-# text = "Hello, I'm a language model"
-# encoding = tiktoken.get_encoding("gpt2") # [15496, 11, 314, 1101, 257, 3303, 2746]
-# token = encoding.encode(text=text)
-# tokens = torch.tensor(token, dtype=torch.long)
-# x = tokens.unsqueeze(0).repeat(num_return_sequences,1)
-# x= x.to(device=device)
+# Load the encoding for GPT-2
+text = "Hello, I'm a language model"
+encoding = tiktoken.get_encoding("gpt2") # [15496, 11, 314, 1101, 257, 3303, 2746]
+token = encoding.encode(text=text)
+tokens = torch.tensor(token, dtype=torch.long)
+x = tokens.unsqueeze(0).repeat(num_return_sequences,1)
+x= x.to(device=device)
 
-# #sample liked pipeline fron transformer
-# # generate! right now x is (B, T) where B = 5, T = 8
-# while x.size(1)  < max_length:
-#     with torch.no_grad():
-#         # B, T -> B, T, C
-#         logits = model(x) #B, T, vocab_size
-#         # take the logits at the last position
-#         logits = logits[:, -1,:] # (B, vocab_size)
-#         # get the probabilities
-#         probs = F.softmax(logits, dim=-1) # (B, vocab_size)
-#         # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-#         top_probs, top_indices = torch.topk(probs, k=50, dim=-1)  # Shape: (B, 50)
-#         # select a token from the top-k probabilities
-#         # note: multinomial does not demand the input to sum to 1
-#         ix = torch.multinomial(top_probs, 1) # Shape: (B, 1)
-#         xcol = torch.gather(top_indices, -1, ix)
-#         x = torch.cat((x, xcol), dim=1) # (B, T+1)
+#sample liked pipeline fron transformer
+# generate! right now x is (B, T) where B = 5, T = 8
+while x.size(1)  < max_length:
+    with torch.no_grad():
+        # B, T -> B, T, C
+        logits = model(x) #B, T, vocab_size
+        # take the logits at the last position
+        logits = logits[:, -1,:] # (B, vocab_size)
+        # get the probabilities
+        probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+        # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+        top_probs, top_indices = torch.topk(probs, k=50, dim=-1)  # Shape: (B, 50)
+        # select a token from the top-k probabilities
+        # note: multinomial does not demand the input to sum to 1
+        ix = torch.multinomial(top_probs, 1) # Shape: (B, 1)
+        xcol = torch.gather(top_indices, -1, ix)
+        x = torch.cat((x, xcol), dim=1) # (B, T+1)
 
-# for i in range(num_return_sequences):
-#     tokens = x[i, :max_length].tolist()
-#     x = encoding.decode(tokens)
-#     print(f'generate text: {x}')
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = encoding.decode(tokens)
+    print(f'generate text: {decoded}')
+
     
 
 
