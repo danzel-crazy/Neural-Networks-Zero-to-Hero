@@ -5,3 +5,7 @@ generate text: Hello, I'm a language model img proportions HDLECTIONugen 1941 sh
 generate text: Hello, I'm a language model drank writer decoration 1941ifles drank HDLES writer MDESECTIONominiumoustoust improving decorationotos blocked HDL Monk Favorite jaw
 generate text: Hello, I'm a language model 1973 proportions Esperoust elder rebate Patricia drank Favorite Esper Prediction rebateotos MD rebate influenzaangling improving drank received unfold Transmission img
 generate text: Hello, I'm a language model jaw Lenin shadingunkathilov writer decoration unfold MD improving Councilunk HDLES Favorite HDL setting 1944ominium proportions294 influenza
+
+2. Faster model 
+    1. 150ms for set to bfloat16
+    2. 90ms for autocast

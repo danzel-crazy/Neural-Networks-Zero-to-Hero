@@ -5,7 +5,35 @@ from dataclasses import dataclass
 import transformers
 import math
 import tiktoken
+import time
+import argparse
 
+class Dataloaderlite():
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        #read input file 
+        with open('input.txt', 'r') as f:
+            text = f.read()
+        encoding = tiktoken.get_encoding("gpt2") # [15496, 11, 314, 1101, 257, 3303, 2746]
+        token = encoding.encode(text=text)
+        self.tokens = torch.tensor(token, dtype=torch.long)
+        
+        self.start_pos = 0
+        print(f'load {len(self.tokens)} tokens')
+        print(f'1 epoch = {len(self.tokens) // B*T} batches')
+        
+    def next_iter(self):
+        B, T = self.B, self.T
+        batch = self.tokens[self.start_pos: self.start_pos+B*T+1]
+        x = batch[:-1].view(B,T) #inputs
+        y = batch[1:].view(B,T)  #targets
+        
+        self.start_pos += B*T
+        if self.start_pos + B*T + 1 > len(self.tokens):
+            self.start_pos = 0
+        return x,y
+    
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -14,6 +42,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu =  nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
     
     def forward(self, x):
         x = self.c_fc(x)
@@ -46,16 +75,16 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        att = (q @ k.transpose(-1, -2)) / math.sqrt(k.size(-1))
-        att = att.masked_fill(self.bias[:, :, :T, :T]==0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v #(B, nh, T, T) @ (B, nh, T, hs) = (B, nh, T, hs)
+        # att = (q @ k.transpose(-1, -2)) / math.sqrt(k.size(-1))
+        # att = att.masked_fill(self.bias[:, :, :T, :T]==0, float('-inf'))
+        # att = F.softmax(att, dim=-1)
+        # y = att @ v #(B, nh, T, T) @ (B, nh, T, hs) = (B, nh, T, hs)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
         
         return y
-
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -92,8 +121,26 @@ class GPT(nn.Module):
         )
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-    
-    def forward(self, idx):
+        
+        #weight sharing scheme
+        self.transformer.wte.weight = self.lm_head.weight
+        
+        
+        self.apply(self._init_weights)
+        
+        #initail weight linear std=0.02 embedding std=0.02
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets=None):
         #input: (B,T)
         B, T = idx.shape
         #forward token and positional embedding
@@ -106,8 +153,12 @@ class GPT(nn.Module):
             x = h(x)
         #forward layernorm and final mlp
         x= self.transformer.ln_f(x)
-        logits = self.lm_head(x)
-        return logits
+        logits = self.lm_head(x) # B, T , C
+        
+        loss =None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
         
         
     @classmethod
@@ -159,58 +210,92 @@ class GPT(nn.Module):
 
         return model
 
-#----------------------
-if torch.cuda.is_available():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f'device = {device}')
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Script for generating samples using a flag.")
+    
+    # Add a flag `--generate`
+    parser.add_argument("--generate", action="store_true", default=False, help="Generate a sample if this flag is set.")
+    
+    args = parser.parse_args()
+
+    #----------------------
+    if torch.cuda.is_available():
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = "cuda"
+        print(f'device = {device}')
+
+    
+    torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(1337)
+        torch.cuda.manual_seed_all(1337)  # For multi-GPU setups
+        
+    torch.set_float32_matmul_precision('high')
+    model = GPT(GPTConfig(vocab_size=50304))
+    model.to(device)
+    # model = torch.compile(model)
+
+    #Training loop 
+    batch = Dataloaderlite(B=16, T=64)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    train_iters = 50
+
+    for i in range(train_iters):
+        t1 = time.time()
+        optimizer.zero_grad()
+        input, target = batch.next_iter()
+        input, target = input.to(device), target.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(input, target) # (B, T, C)
+        
+        loss.backward()
+        optimizer.step()
+        torch.cuda.synchronize()
+        t2 = time.time()
+        dur = (t2 - t1)*1000
+        print(f'iterations {i}, loss : {loss.item()}, time : {dur}ms')
 
 
-# gpt2_hf = GPT.from_pretrained('gpt2')
-print(f'all good for load model')
 
-model = GPT(GPTConfig())
-model.to(device)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(42)
-    torch.cuda.manual_seed_all(42)  # For multi-GPU setups
+    #generate text setting 
+    model.eval()
+    max_length = 30
+    num_return_sequences = 5
 
-#generate text setting 
-model.eval()
+    # Load the encoding for GPT-2
+    encoding = tiktoken.get_encoding("gpt2") 
 
-max_length = 30
-num_return_sequences = 5
 
-# Load the encoding for GPT-2
-text = "Hello, I'm a language model"
-encoding = tiktoken.get_encoding("gpt2") # [15496, 11, 314, 1101, 257, 3303, 2746]
-token = encoding.encode(text=text)
-tokens = torch.tensor(token, dtype=torch.long)
-x = tokens.unsqueeze(0).repeat(num_return_sequences,1)
-x= x.to(device=device)
+    #sample liked pipeline fron transformer
+    # Check if the flag is used
+    if args.generate:
+        text = "Hello, I'm a language model" # [15496, 11, 314, 1101, 257, 3303, 2746]
+        token = encoding.encode(text=text)
+        tokens = torch.tensor(token, dtype=torch.long)
+        x = tokens.unsqueeze(0).repeat(num_return_sequences,1)
+        x= x.to(device=device)
+        # generate! right now x is (B, T) where B = 5, T = 8
+        while x.size(1)  < max_length:
+            with torch.no_grad():
+                # B, T -> B, T, C
+                logits, _  = model(x) #B, T, vocab_size
+                # take the logits at the last position
+                logits = logits[:, -1,:] # (B, vocab_size)
+                # get the probabilities
+                probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+                # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+                top_probs, top_indices = torch.topk(probs, k=50, dim=-1)  # Shape: (B, 50)
+                # select a token from the top-k probabilities
+                # note: multinomial does not demand the input to sum to 1
+                ix = torch.multinomial(top_probs, 1) # Shape: (B, 1)
+                xcol = torch.gather(top_indices, -1, ix)
+                x = torch.cat((x, xcol), dim=1) # (B, T+1)
 
-#sample liked pipeline fron transformer
-# generate! right now x is (B, T) where B = 5, T = 8
-while x.size(1)  < max_length:
-    with torch.no_grad():
-        # B, T -> B, T, C
-        logits = model(x) #B, T, vocab_size
-        # take the logits at the last position
-        logits = logits[:, -1,:] # (B, vocab_size)
-        # get the probabilities
-        probs = F.softmax(logits, dim=-1) # (B, vocab_size)
-        # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-        top_probs, top_indices = torch.topk(probs, k=50, dim=-1)  # Shape: (B, 50)
-        # select a token from the top-k probabilities
-        # note: multinomial does not demand the input to sum to 1
-        ix = torch.multinomial(top_probs, 1) # Shape: (B, 1)
-        xcol = torch.gather(top_indices, -1, ix)
-        x = torch.cat((x, xcol), dim=1) # (B, T+1)
-
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = encoding.decode(tokens)
-    print(f'generate text: {decoded}')
+        for i in range(num_return_sequences):
+            tokens = x[i, :max_length].tolist()
+            decoded = encoding.decode(tokens)
+            print(f'generate text: {decoded}')
 
     
 
